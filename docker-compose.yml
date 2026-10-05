@@ -1,0 +1,61 @@
+# UNBODGE local deployment (Phase 4).
+# Services: api (FastAPI + server-rendered UI), worker (proof CLI jobs),
+# postgres (durable store), redis (transient coordination).
+# The UI is served by the api service; no separate frontend build.
+# Temporal server and Nebius executors are documented but not provisioned
+# here (see docs/DEPLOY.md); the worker runs jobs locally via run_pipeline.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: unbodge
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for non-local use}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d unbodge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      UNBODGE_POSTGRES_DSN: "dbname=unbodge user=postgres password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD} host=postgres"
+      UNBODGE_REDIS_URL: "redis://redis:6379/0"
+      UNBODGE_WEBHOOK_SECRET: "${UNBODGE_WEBHOOK_SECRET:?set a webhook secret}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: .
+    environment:
+      UNBODGE_POSTGRES_DSN: "dbname=unbodge user=postgres password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD} host=postgres"
+      UNBODGE_REDIS_URL: "redis://redis:6379/0"
+    volumes:
+      - ./jobs:/jobs:ro
+    # Runs one proof job file, then exits (orchestrator re-invokes per job):
+    command: ["python", "-m", "workflow.cli", "/jobs/job.json"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
