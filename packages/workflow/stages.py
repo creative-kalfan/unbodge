@@ -3,7 +3,7 @@
 Each stage is a module-level function ``(PipelineState, PipelineContext)
 -> PipelineState`` with no framework imports: a Temporal activity can wrap
 any stage 1:1 later. The local ``run_pipeline`` executes them in order.
-No reasoning, no LLM -- every choice is explicit in the context/state.
+Optional model analysis is advisory; all proof inputs remain explicit.
 """
 
 from __future__ import annotations
@@ -31,20 +31,23 @@ from evidence.graph import validate_graph
 from evidence.items import make_evidence
 from evidence.validation import ensure_valid, validate_item
 from experiments.real import (
-    ensure_workaround_state,
-    prepare_cell_workdir,
-    read_workdir_files,
+    prepared_files,
     run_real_suite,
 )
 from experiments.runner import parse_regression_counts
 from github.git import GitRepo
 from history.reconstruction import Reconstructor
 from history.states import HistoryError, HistoricalState
+from history.provenance import GitProvenance
+from experiments.attestation import ExecutionLedger, artifact_hash
 from policy.engine import PolicyInput, evaluate_policy
 from pr.generator import LocalPrGenerator, render_pr_body
 from pydantic import BaseModel, ConfigDict, Field
 from pypi.base import PyPIClient
 from sandbox.docker import DockerSandbox
+from reasoning.base import ReasoningProvider
+from reasoning.models import UpstreamAnalysis
+from reasoning.errors import ReasoningError
 
 STAGE_NAMES: tuple[str, ...] = (
     "ingest_event",
@@ -104,6 +107,9 @@ class PipelineContext:
     regression_env: dict[str, str] = field(default_factory=dict)
     timeout_s: float = 60
     scan_exclude_prefixes: tuple[str, ...] = ()
+    provenance: GitProvenance | None = None
+    execution: ExecutionLedger = field(default_factory=ExecutionLedger, repr=False, compare=False)
+    reasoning: ReasoningProvider | None = field(default=None, repr=False, compare=False)
 
 
 class PipelineState(BaseModel):
@@ -131,6 +137,9 @@ class PipelineState(BaseModel):
     pr_id: str | None = None
     pr_skipped: bool = False
     workflow: WorkflowRun | None = None
+    failure: str | None = None
+    advisory: UpstreamAnalysis | None = None
+    reasoning_status: str = "NOT_REQUESTED"
 
 
 def _sandbox(ctx: PipelineContext) -> DockerSandbox:
@@ -140,12 +149,28 @@ def _sandbox(ctx: PipelineContext) -> DockerSandbox:
 
 
 def stage_ingest_event(state: PipelineState, ctx: PipelineContext) -> PipelineState:
-    return state.model_copy(update={"event_id": ctx.event.id})
+    updates = {"event_id": ctx.event.id}
+    if ctx.reasoning is not None:
+        try:
+            analysis = ctx.reasoning.analyze_upstream(
+                issue_id=ctx.issue_id, title=ctx.event.title, body=ctx.event.body,
+            )
+            if analysis.issue_id != ctx.issue_id:
+                raise ValueError("advisory issue identity mismatch")
+            updates.update(advisory=analysis.model_copy(update={"verified": False}),
+                           reasoning_status="ADVISORY_RECORDED")
+        except (ReasoningError, ValueError, TypeError, AttributeError):
+            # Provider errors never become evidence, nor expose response bodies.
+            updates.update(advisory=None, reasoning_status="UNAVAILABLE")
+    return state.model_copy(update=updates)
 
 
 def stage_collect_upstream_evidence(
     state: PipelineState, ctx: PipelineContext
 ) -> PipelineState:
+    if ctx.provenance is None:
+        raise HistoryError("upstream provenance verifier is not configured")
+    observation = ctx.provenance.verify(ctx)
     items = [
         ("issue", EvidenceType.UPSTREAM_ISSUE, ctx.issue_id, "upstream issue recorded"),
         ("fix", EvidenceType.FIX_COMMIT, ctx.fix_id, f"upstream fix commit {ctx.fix_sha}"),
@@ -160,6 +185,7 @@ def stage_collect_upstream_evidence(
                 source="github-adapter",
                 claim=claim,
                 artifact_ref=ref,
+                payload={"provenance": observation},
             )
         )
         ids.append(item.id)
@@ -174,6 +200,9 @@ def stage_collect_upstream_evidence(
 
 
 def stage_identify_release(state: PipelineState, ctx: PipelineContext) -> PipelineState:
+    if ctx.provenance is None:
+        raise HistoryError("upstream provenance verifier is not configured")
+    observation = ctx.provenance.verify(ctx)
     for release in ctx.releases:
         if release.contains_fix_sha == ctx.fix_sha:
             item = ensure_valid(
@@ -183,6 +212,7 @@ def stage_identify_release(state: PipelineState, ctx: PipelineContext) -> Pipeli
                     source="github-adapter",
                     claim=f"release {release.tag} contains fix {ctx.fix_sha}",
                     artifact_ref=release.tag,
+                    payload={"provenance": observation},
                 )
             )
             return state.model_copy(
@@ -310,6 +340,8 @@ def stage_run_experiments(state: PipelineState, ctx: PipelineContext) -> Pipelin
         sandbox=_sandbox(ctx),
         plan_id=ctx.plan_id,
         timeout_s=ctx.timeout_s,
+        package=ctx.provenance.package if ctx.provenance else "fake-dep",
+        execution=ctx.execution,
     )
     ordered = [result.runs[cell] for cell in UniverseCell]
     return state.model_copy(update={"runs": ordered, "matrix": dict(result.matrix)})
@@ -343,13 +375,12 @@ def stage_run_regression_tests(
     state: PipelineState, ctx: PipelineContext
 ) -> PipelineState:
     git = GitRepo(ctx.repo_path)
-    with TemporaryDirectory(prefix="unbodge-reg-") as tmp:
-        workdir = prepare_cell_workdir(git, ctx.new_rev, tmp)
-        files = read_workdir_files(workdir)
-        container = _sandbox(ctx).run_container(
-            files, list(ctx.regression_argv), dict(ctx.regression_env),
-            timeout_s=ctx.timeout_s,
-        )
+    revision = git.rev_parse(ctx.new_rev)
+    files = prepared_files(git, revision, ctx.workaround_patch, present=False)
+    receipt, container = ctx.execution.execute(
+        _sandbox(ctx), files, ctx.regression_argv, ctx.regression_env,
+        run_id=f"regression:{ctx.plan_id}:1", git_sha=revision, timeout_s=ctx.timeout_s,
+    )
     passed, failed = parse_regression_counts(container.stdout)
     status = TestStatus.PASS if (failed == 0 and passed > 0) else TestStatus.FAIL
     if (failed == 0 and passed > 0) != (container.exit_code == 0):
@@ -362,7 +393,11 @@ def stage_run_regression_tests(
         failed=failed,
         status=status,
         duration_s=max(container.duration_s, 0.0),
-        git_sha=git.rev_parse(ctx.new_rev),
+        git_sha=revision,
+        artifact_hash=artifact_hash(files), execution_receipt=receipt,
+        command=list(ctx.regression_argv), stdout=container.stdout, stderr=container.stderr,
+        environment=dict(container.environment),
+        exit_code=container.exit_code,
     )
     item = ensure_valid(
         make_evidence(
@@ -372,12 +407,7 @@ def stage_run_regression_tests(
             claim=f"regression suite {status.value} on NEW without the workaround",
             artifact_ref=f"artifact:{regression.id}",
             experiment_id=regression.id,
-            payload={
-                "suite": regression.suite,
-                "passed": regression.passed,
-                "failed": regression.failed,
-                "status": regression.status.value,
-            },
+            payload=regression.model_dump(mode="json"),
         )
     )
     return state.model_copy(
@@ -400,6 +430,9 @@ def _with_advance(state: PipelineState, target: WorkflowState) -> PipelineState:
 
 
 def stage_validate_policy(state: PipelineState, ctx: PipelineContext) -> PipelineState:
+    from policy.authorization import validate_proof
+
+    validate_proof(state, ctx)
     if state.regression is None or state.hypothesis is None:
         raise HistoryError("policy requires regression and hypothesis")
     if not state.evidence:
@@ -469,10 +502,7 @@ def stage_create_pr(state: PipelineState, ctx: PipelineContext) -> PipelineState
     if state.decision.outcome != DecisionOutcome.PROPOSE_REMOVAL:
         return state.model_copy(update={"pr_skipped": True})
     git = GitRepo(ctx.repo_path)
-    with TemporaryDirectory(prefix="unbodge-pr-") as tmp:
-        workdir = prepare_cell_workdir(git, ctx.new_rev, tmp)
-        ensure_workaround_state(workdir, ctx.workaround_patch, present=False)
-        files = read_workdir_files(workdir)
+    files = prepared_files(git, ctx.new_rev, ctx.workaround_patch, present=False)
     release_tag = next(
         (r.tag for r in ctx.releases if r.id == state.release_id), state.release_id or "unknown"
     )
@@ -490,12 +520,15 @@ def stage_create_pr(state: PipelineState, ctx: PipelineContext) -> PipelineState
         release_tag=release_tag,
         removed_files=[candidate_path] if candidate_path else [],
     )
+    from policy.authorization import RemovalProof
+
     pr = LocalPrGenerator(git).create_proposal(
         decision=state.decision,
         title=f"Remove obsolete workaround ({state.candidate_id})",
         body=body,
         files=files,
         base_branch="main",
+        proof=RemovalProof(ctx, state),
     )
     updated = state.model_copy(update={"pr_id": pr.id})
     return _with_advance(updated, WorkflowState.PR_CREATED)

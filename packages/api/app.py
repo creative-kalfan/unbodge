@@ -14,6 +14,7 @@ mode. Security headers ship on every response.
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 import hmac
 import os
 import time
@@ -27,6 +28,7 @@ from api.views import causal_graph, dashboard, evidence_ledger, pr_detail, pr_li
 from api.webhooks import WebhookError, parse_webhook
 from cache import Cache
 from cache.memory import MemoryCache
+from cache.redis_backend import RedisCache
 from domain.enums import DecisionOutcome, ReviewVerdict, UniverseCell
 from domain.models import EvidenceItem, HumanReview, Repository, UpstreamEvent, utcnow
 from evidence.scrub import scrub_item
@@ -34,6 +36,7 @@ from experiments.contracts import CounterfactualResult, CounterfactualSuite
 from experiments.runner import run_suite
 from persistence import Store
 from persistence.memory import MemoryStore
+from persistence.postgres import PostgresStore
 from pydantic import ValidationError
 from tracing import LocalTracer, TraceEvent, Tracer
 
@@ -70,9 +73,37 @@ def create_app(
     tracer: Tracer | None = None,
     sandbox=None,
 ) -> FastAPI:
-    app = FastAPI(title="UNBODGE", version=VERSION)
-    app.state.store = store or MemoryStore()
-    app.state.cache = cache or MemoryCache()
+    if store is None:
+        postgres_dsn = os.environ.get("UNBODGE_POSTGRES_DSN")
+        if postgres_dsn and postgres_dsn.strip():
+            store = PostgresStore(postgres_dsn.strip())
+        else:
+            store = MemoryStore()
+
+    if cache is None:
+        redis_url = os.environ.get("UNBODGE_REDIS_URL")
+        if redis_url and redis_url.strip():
+            cache = RedisCache(redis_url.strip())
+        else:
+            cache = MemoryCache()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        yield
+        if hasattr(app.state.store, "close"):
+            try:
+                app.state.store.close()
+            except Exception:
+                pass
+        if hasattr(app.state.cache, "close"):
+            try:
+                app.state.cache.close()
+            except Exception:
+                pass
+
+    app = FastAPI(title="UNBODGE", version=VERSION, lifespan=lifespan)
+    app.state.store = store
+    app.state.cache = cache
     app.state.tracer = tracer or LocalTracer()
     app.state.sandbox = sandbox
 

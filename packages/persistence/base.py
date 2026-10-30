@@ -31,6 +31,7 @@ ENTITIES: tuple[str, ...] = (
     "releases",
     "workaround_candidates",
     "causal_hypotheses",
+    "workflow_observations",
     "reproduction_plans",
     "experiments",
     "experiment_runs",

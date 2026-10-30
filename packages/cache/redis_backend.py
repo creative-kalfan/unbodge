@@ -7,10 +7,19 @@ import is lazy so offline environments import safely.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 
 from cache.base import Cache, CacheError, CacheUnavailableError
+
+
+def _redact(error: Exception) -> str:
+    """Strip authentication tokens and passwords from driver error text."""
+    text = str(error)
+    text = re.sub(r"://([^:]+):([^@]+)@", r"://\1:[redacted]@", text)
+    text = re.sub(r"password=[^\s]+", "password=[redacted]", text)
+    return text[:300]
 
 
 def _driver():
@@ -30,9 +39,22 @@ class RedisCache(Cache):
             self._client = module.Redis.from_url(url, socket_timeout=5)
             self._client.ping()
         except Exception as exc:
-            raise CacheUnavailableError(f"redis unreachable: {exc}") from exc
+            raise CacheUnavailableError(f"redis unreachable: {_redact(exc)}") from exc
         self._namespace = namespace
         self._tokens: dict[str, str] = {}
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
+
+    def ping(self) -> bool:
+        """Safe non-destructive health check (PING)."""
+        try:
+            return bool(self._client.ping())
+        except Exception:
+            return False
 
     def _key(self, key: str) -> str:
         if not key or len(key) > 512:
@@ -102,15 +124,15 @@ class RedisCache(Cache):
             "local count = redis.call('ZCARD', KEYS[1]) "
             "if count >= tonumber(ARGV[2]) then return 0 end "
             "redis.call('ZADD', KEYS[1], ARGV[3], ARGV[4]) "
-            "redis.call('EXPIRE', KEYS[1], ARGV[5]) "
+            "redis.call('EXPIRE', KEYS[1], math.floor(tonumber(ARGV[5]))) "
             "return 1"
         )
         try:
             allowed = self._client.eval(
-                script, 1, redis_key, now, now - window_s, limit, now, member, window_s + 1
+                script, 1, redis_key, str(now - window_s), str(limit), str(now), member, str(window_s + 1)
             )
         except Exception as exc:
-            raise CacheError(f"redis rate limit failed: {exc}") from exc
+            raise CacheError(f"redis rate limit failed: {_redact(exc)}") from exc
         return bool(allowed)
 
 

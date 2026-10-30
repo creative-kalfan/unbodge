@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from evidence.scrub import scrub_text
 from tracing.base import TraceEvent, Tracer
 
 DEFAULT_ENDPOINT = "https://api.smith.langchain.com"
@@ -42,9 +43,10 @@ def _scrub(attributes: dict[str, str]) -> dict[str, str]:
     cleaned: dict[str, str] = {}
     for key, value in attributes.items():
         text = value if isinstance(value, str) else str(value)
-        if len(text) > MAX_ATTRIBUTE_CHARS:
-            text = text[:MAX_ATTRIBUTE_CHARS]
-        cleaned[key] = text
+        scrubbed, _ = scrub_text(text)
+        if len(scrubbed) > MAX_ATTRIBUTE_CHARS:
+            scrubbed = scrubbed[:MAX_ATTRIBUTE_CHARS]
+        cleaned[key] = scrubbed
     return cleaned
 
 

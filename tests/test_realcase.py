@@ -89,7 +89,13 @@ def _sandbox():
 
 
 def _context(refs, marker_extra="foo_bar") -> PipelineContext:
-    return PipelineContext(
+    from proof_support import with_provenance
+    from github.git import GitRepo
+
+    repo = GitRepo(refs["root"])
+    paths = set(repo.list_files_at(refs["old_tag"])) | set(repo.list_files_at(refs["new_tag"]))
+    sources = tuple((p, p.removeprefix("vendor/")) for p in sorted(paths) if p.startswith("vendor/"))
+    return with_provenance(PipelineContext(
         repository_id=REPO_ID,
         repo_path=str(refs["root"]),
         old_rev=refs["old_tag"],
@@ -112,7 +118,8 @@ def _context(refs, marker_extra="foo_bar") -> PipelineContext:
         probe_env={"MARKER_EXTRA": marker_extra},
         regression_env={},
         scan_exclude_prefixes=("vendor/",),
-    )
+    ), package="packaging", sources=sources, upstream_name="pypa/packaging",
+       downstream_name="pypa/pip", issue_number=545, symptom_number=11924)
 
 
 def _reasoning_proposals():

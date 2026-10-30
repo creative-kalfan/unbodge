@@ -186,9 +186,15 @@ class NebiusReasoningProvider(ReasoningProvider):
         return ReasoningMalformedError(f"nebius HTTP error: {exc.code}")
 
     def _parse(self, operation: str, data: dict[str, Any]):
-        adapter: TypeAdapter = TypeAdapter(_MODELS[_OPERATIONS[operation]])
+        if not isinstance(data, dict):
+            raise ReasoningMalformedError("nebius output must be a JSON object")
+        target_cls = _MODELS[_OPERATIONS[operation]]
+        adapter: TypeAdapter = TypeAdapter(target_cls)
+        # Filter fields to target model schema so extraneous fields from LLMs do not fail validation
+        allowed_fields = getattr(target_cls, "model_fields", {}).keys()
+        filtered_data = {k: v for k, v in data.items() if k in allowed_fields} if allowed_fields else data
         try:
-            parsed = adapter.validate_python(data)
+            parsed = adapter.validate_python(filtered_data)
         except ValidationError as exc:
             raise ReasoningMalformedError(
                 f"nebius output failed {_OPERATIONS[operation]} validation: {exc.errors()}"

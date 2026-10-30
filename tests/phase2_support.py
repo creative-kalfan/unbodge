@@ -155,7 +155,9 @@ def build_downstream_fixture(path: str | Path) -> dict:
     apply_patch_text(root, WORKAROUND_PATCH)
     (root / "workaround.patch").unlink()
     write(root, "requirements.txt", "fake-dep==1.0\n")
-    old_sha = commit_all(root, "downstream adds nickname workaround")
+    old_sha = commit_all(root, "downstream adds nickname workaround\n\n"
+                        "https://github.com/unbodge-fixtures/upstream/issues/7\n"
+                        "https://github.com/unbodge-fixtures/downstream/issues/1")
     tag(root, "downstream-v1.0")
     write(root, "requirements.txt", "fake-dep==1.1\n")
     write(root, "dep.py", DEP_NEW)

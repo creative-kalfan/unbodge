@@ -65,6 +65,24 @@ def test_mock_rejects_empty_inputs():
         provider.generate_reproduction(hypothesis_id="h", claim="  ")
 
 
+def test_parse_filters_extraneous_fields_gracefully():
+    provider = NebiusReasoningProvider(
+        api_key="k",
+        model="m",
+        opener=_opener_for({
+            "issue_id": "issue:100",
+            "summary": "a summary",
+            "extra_unwanted_key": "some value",
+            "another_field": 12345,
+        }),
+    )
+    result = provider.analyze_upstream(issue_id="issue:100", title="title")
+    assert result.issue_id == "issue:100"
+    assert result.summary == "a summary"
+    assert result.verified is False
+    assert not hasattr(result, "extra_unwanted_key")
+
+
 def _opener_for(payload: dict):
     def opener(request, timeout):
         body = json.dumps({"choices": [{"message": {"content": json.dumps(payload)}}]})

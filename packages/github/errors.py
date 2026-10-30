@@ -17,4 +17,8 @@ class GitError(GitHubError):
     """A local git operation failed (or refused an unsafe input)."""
 
 
-__all__ = ["GitError", "GitHubError", "GitHubNotFoundError"]
+class GitHubAuthError(GitHubError):
+    """GitHub authentication or permission failed."""
+
+
+__all__ = ["GitError", "GitHubAuthError", "GitHubError", "GitHubNotFoundError"]

@@ -56,7 +56,9 @@ def _releases():
 
 
 def _context(refs, releases) -> PipelineContext:
-    return PipelineContext(
+    from proof_support import with_provenance
+
+    return with_provenance(PipelineContext(
         repository_id=REPO_ID,
         repo_path=str(refs["root"]),
         old_rev=refs["old_tag"],
@@ -78,7 +80,7 @@ def _context(refs, releases) -> PipelineContext:
         decision_id="decision:phase2:proof",
         probe_env={"DEP_VERSION": "OLD", "WORKAROUND": "PRESENT"},
         regression_env={"DEP_VERSION": "NEW", "WORKAROUND": "ABSENT"},
-    )
+    ))
 
 
 @needs_docker
@@ -161,6 +163,11 @@ def test_phase2_ambiguous_case_abstains_without_pr(tmp_path):
     initial = PipelineState(workflow=WorkflowRun(id="wf:ambiguous", hypothesis_id=None))
     final = run_pipeline(initial, ctx)
 
+    if final.failure:
+        # An already-fixed OLD dependency has no verified fixing change.
+        assert final.decision.outcome == DecisionOutcome.ABSTAIN
+        assert final.pr_id is None and final.pr_skipped
+        return
     assert final.matrix[UniverseCell.B] == TestStatus.PASS  # bug does not reproduce
     assert final.candidate_id is not None  # workaround was found...
     assert final.decision is not None

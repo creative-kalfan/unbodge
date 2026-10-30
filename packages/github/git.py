@@ -75,18 +75,21 @@ class GitRepo:
                 cwd=self._root,
                 env=env,
                 capture_output=True,
-                text=True,
                 timeout=_GIT_TIMEOUT_S,
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitError(f"git {' '.join(args)} failed: {exc}") from exc
+        try:
+            stdout = completed.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise GitError("Git proof source is not UTF-8 text") from exc
         if completed.returncode != 0:
             raise GitError(
                 f"git {' '.join(args)} exited {completed.returncode}: "
-                f"{completed.stderr.strip()[:500]}"
+                f"{completed.stderr.decode('utf-8', errors='replace').strip()[:500]}"
             )
-        return completed.stdout
+        return stdout
 
     def rev_parse(self, rev: str) -> str:
         """Resolve any rev (tag, branch, prefix) to a full 40-char SHA."""
@@ -247,6 +250,38 @@ class GitRepo:
         except GitError:
             return None
         return out.strip() or None
+
+    def commit_proposal_tree(self, files: dict[str, str], base_sha: str,
+                             branch: str, message: str) -> str:
+        """Commit exactly the authorized text tree, including deletions.
+
+        A private index avoids changing the worktree/index or accidentally
+        committing unrelated files. update-ref atomically rejects a replay.
+        Callers must authorize the entire tree before invoking this method.
+        """
+        import tempfile
+
+        _check_branch(branch)
+        for path in files:
+            _check_rel_path(path)
+        with tempfile.TemporaryDirectory(prefix="unbodge-index-") as tmp:
+            env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"),
+                       GIT_AUTHOR_NAME="unbodge", GIT_AUTHOR_EMAIL="unbodge@local",
+                       GIT_COMMITTER_NAME="unbodge", GIT_COMMITTER_EMAIL="unbodge@local")
+            self._run("read-tree", "--empty", env=env)
+            for path, content in sorted(files.items()):
+                blob = subprocess.run(
+                    ["git", "hash-object", "-w", "--stdin"], input=content.encode("utf-8"),
+                    cwd=self._root, capture_output=True, timeout=_GIT_TIMEOUT_S, check=False,
+                )
+                if blob.returncode:
+                    raise GitError("could not write authorized blob")
+                sha = blob.stdout.decode().strip()
+                self._run("update-index", "--add", "--cacheinfo", f"100644,{sha},{path}", env=env)
+            tree = self._run("write-tree", env=env).strip()
+            commit = self._run("commit-tree", tree, "-p", base_sha, "-m", message, env=env).strip()
+            self._run("update-ref", f"refs/heads/{branch}", commit, "0" * 40)
+            return commit
 
 
 __all__ = ["GitRepo"]

@@ -14,7 +14,6 @@ from collections.abc import Mapping, Sequence
 from domain.enums import TestStatus, UniverseCell
 from domain.errors import UnbodgeError
 from domain.models import PullRequestResult, RemovalDecision, utcnow
-from github.errors import GitError
 from github.git import GitRepo
 
 
@@ -84,6 +83,7 @@ class LocalPrGenerator:
         body: str,
         files: Mapping[str, str],
         base_branch: str = "main",
+        proof=None,
     ) -> PullRequestResult:
         """Commit ``files`` on a new branch and return the PR artifact."""
         if not title.strip():
@@ -92,17 +92,19 @@ class LocalPrGenerator:
             raise PrGeneratorError("PR body must be non-empty")
         if not files:
             raise PrGeneratorError("PR proposal requires at least one file")
-        base_sha = self._repo.rev_parse(base_branch)
-        branch = f"unbodge/{_slug(decision.hypothesis_id or decision.id)}"
+        files = dict(files)
+        from policy.authorization import authorize_proposal
+
         try:
-            self._repo.create_branch(branch, base_sha)
-        except GitError:
-            branch = f"unbodge/{_slug(decision.id)}-{base_sha[:8]}"
-            self._repo.create_branch(branch, base_sha)
-        commit_sha = self._repo.commit_files(
+            base_sha = authorize_proposal(self._repo, decision, files, proof, base_branch)
+        except (UnbodgeError, ValueError, TypeError, AttributeError, KeyError) as exc:
+            raise PrGeneratorError(f"proposal not authorized: {exc}") from exc
+        branch = f"unbodge/{_slug(decision.hypothesis_id or decision.id)}"
+        if branch in self._repo._run("for-each-ref", "--format=%(refname:short)", "refs/heads/").splitlines():
+            raise PrGeneratorError("proposal already exists; replay requires a fresh proof")
+        commit_sha = self._repo.commit_proposal_tree(
+            dict(files), base_sha, branch,
             f"{title}\n\nEvidence: {', '.join(decision.evidence_ids[:5])}",
-            dict(files),
-            branch=branch,
         )
         _ = commit_sha
         return PullRequestResult(

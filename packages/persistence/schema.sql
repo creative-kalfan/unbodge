@@ -8,6 +8,11 @@ CREATE TABLE IF NOT EXISTS repositories (
     record JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE TABLE IF NOT EXISTS workflow_observations (
+    id TEXT PRIMARY KEY,
+    record JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS upstream_events (
     id TEXT PRIMARY KEY,
     record JSONB NOT NULL,

@@ -20,6 +20,7 @@ from domain.errors import DomainError
 from domain.models import ExperimentRun
 from evidence.hashing import sha256_hex
 from experiments.contracts import CounterfactualResult
+from experiments.attestation import ExecutionLedger, artifact_hash
 from github.git import GitRepo
 from sandbox.docker import DockerSandbox
 
@@ -191,6 +192,20 @@ def dependency_label_at(git: GitRepo, rev: str, package: str = "fake-dep") -> st
     return f"{package}==unknown"
 
 
+def prepared_files(git: GitRepo, rev: str, patch: str, *, present: bool) -> dict[str, str]:
+    """Materialize a complete, supported text tree; refuse silently omitted inputs."""
+    if set(git._run("ls-tree", "-r", "--format=%(objectmode)", git.rev_parse(rev)).splitlines()) - {"100644"}:
+        raise DomainError("proof artifact requires regular non-executable text files")
+    with TemporaryDirectory(prefix="unbodge-artifact-") as tmp:
+        workdir = prepare_cell_workdir(git, rev, tmp)
+        ensure_workaround_state(workdir, patch, present=present)
+        files = read_workdir_files(workdir)
+        actual = {p.relative_to(workdir).as_posix() for p in workdir.rglob("*") if p.is_file()}
+        if actual != set(files):
+            raise DomainError("proof artifact contains unsupported or omitted files")
+        return files
+
+
 def run_real_suite(
     *,
     git: GitRepo,
@@ -204,6 +219,7 @@ def run_real_suite(
     plan_id: str = "real:1",
     timeout_s: float = 60,
     package: str = "fake-dep",
+    execution: ExecutionLedger | None = None,
 ) -> CounterfactualResult:
     """Execute the four real cells and return the counterfactual result."""
     revs = {"old": git.rev_parse(old_rev), "new": git.rev_parse(new_rev)}
@@ -220,9 +236,17 @@ def run_real_suite(
                 ensure_workaround_state(workdir, workaround_patch, present)
             files = read_workdir_files(workdir)
             dependency = cell.dependency
-            container = sandbox.run_container(
-                files, list(probe_argv), dict(probe_env or {}), timeout_s=timeout_s
-            )
+            spec_id = f"{plan_id}:cell:{cell.value}"
+            if execution is not None:
+                receipt, container = execution.execute(
+                    sandbox, files, probe_argv, dict(probe_env or {}),
+                    run_id=f"{spec_id}:run", git_sha=revs[which], timeout_s=timeout_s,
+                )
+            else:
+                receipt = None
+                container = sandbox.run_container(
+                    files, list(probe_argv), dict(probe_env or {}), timeout_s=timeout_s
+                )
             status = TestStatus.PASS if container.exit_code == 0 else TestStatus.FAIL
             label = dependency_label_at(git, revs[which], package)
             environment = dict(container.environment)
@@ -254,7 +278,8 @@ def run_real_suite(
                 environment=environment,
                 git_sha=revs[which],
                 dependency_state={package: label},
-                test_report={"status": status.value, "exit_code": container.exit_code},
+                test_report={"status": status.value, "exit_code": container.exit_code,
+                             "artifact_hash": artifact_hash(files), "receipt": receipt},
                 artifact_hashes=artifact_hashes,
             )
     return CounterfactualResult(runs=runs)

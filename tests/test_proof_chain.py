@@ -95,23 +95,21 @@ def test_render_pr_body_deterministic_and_complete():
 
 
 def test_local_pr_generator_creates_branch_and_commit(tmp_path):
-    refs = build_downstream_fixture(tmp_path / "downstream")
-    git = GitRepo(refs["root"])
-    decision = RemovalDecision(
-        id="decision:1", hypothesis_id="hyp:1", outcome=DecisionOutcome.PROPOSE_REMOVAL,
-        policy_mode=PolicyMode.PROPOSE_ONLY, rationale="proof holds",
-        evidence_ids=["ev:a"],
-    )
+    from test_proof_authorization import authorized
+
+    ctx, state, files, proof = authorized(tmp_path)
+    git = GitRepo(ctx.repo_path)
+    decision = state.decision
     pr = LocalPrGenerator(git).create_proposal(
         decision=decision, title="Remove obsolete workaround", body="Matrix: A=PASS",
-        files={"app.py": "new content\n"}, base_branch="main",
+        files=files, base_branch="main", proof=proof,
     )
     assert pr.decision_id == decision.id
     assert pr.base == "main" and pr.branch.startswith("unbodge/")
-    assert git.file_at(pr.branch, "app.py") == "new content\n"
+    assert git.file_at(pr.branch, "app.py") == files["app.py"]
     from phase2_support import git_cmd
 
-    assert git_cmd(refs["root"], "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
+    assert git_cmd(ctx.repo_path, "rev-parse", "--abbrev-ref", "HEAD").strip() == "main"
     with pytest.raises(PrGeneratorError):
         LocalPrGenerator(git).create_proposal(
             decision=decision, title="  ", body="b", files={"a.py": "x"})

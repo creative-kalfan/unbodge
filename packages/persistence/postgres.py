@@ -8,8 +8,10 @@ driver import is lazy so offline environments import this module safely.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, unquote, urlparse
 
 from persistence.base import Store, StoreError, StoreUnavailableError, check_entity
 
@@ -31,17 +33,43 @@ def _driver():
     return psycopg2
 
 
+def _parse_dsn(dsn: str) -> dict[str, Any]:
+    """Parse DSN into psycopg2 connect keyword arguments, supporting both URL and key=value formats."""
+    if "://" in dsn:
+        u = urlparse(dsn)
+        kwargs: dict[str, Any] = {}
+        if u.username is not None:
+            kwargs["user"] = unquote(u.username)
+        if u.password is not None:
+            kwargs["password"] = unquote(u.password)
+        if u.hostname is not None:
+            kwargs["host"] = u.hostname
+        if u.port is not None:
+            kwargs["port"] = u.port
+        db = u.path.lstrip("/")
+        if db:
+            kwargs["dbname"] = db
+        if u.query:
+            qs = parse_qs(u.query)
+            for k, vs in qs.items():
+                if vs:
+                    kwargs[k] = vs[-1]
+        return kwargs
+    return {"dsn": dsn}
+
+
 class PostgresStore(Store):
-    """JSONB record store. ``dsn`` e.g. ``dbname=unbodge user=postgres``."""
+    """JSONB record store. ``dsn`` e.g. ``dbname=unbodge user=postgres`` or URL."""
 
     def __init__(self, dsn: str, *, ensure_schema: bool = True) -> None:
         if not dsn.strip():
             raise ValueError("dsn must be non-empty")
-        if "connect_timeout" not in dsn:
-            dsn = f"{dsn} connect_timeout=5"
         self._dsn = dsn
+        conn_kwargs = _parse_dsn(dsn)
+        if "connect_timeout" not in conn_kwargs and "connect_timeout" not in dsn:
+            conn_kwargs["connect_timeout"] = 5
         try:
-            self._conn = _driver().connect(dsn)
+            self._conn = _driver().connect(**conn_kwargs)
             self._conn.autocommit = True
         except Exception as exc:
             raise StoreUnavailableError(f"postgres unreachable: {_redact(exc)}") from exc
@@ -51,6 +79,16 @@ class PostgresStore(Store):
                     cur.execute(_load_schema())
             except Exception as exc:
                 raise StoreError(f"schema setup failed: {_redact(exc)}") from exc
+
+    def ping(self) -> bool:
+        """Safe non-destructive health check (SELECT 1)."""
+        try:
+            with self._conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                row = cur.fetchone()
+                return bool(row and row[0] == 1)
+        except Exception:
+            return False
 
     def close(self) -> None:
         try:
@@ -116,10 +154,9 @@ class PostgresStore(Store):
 
 def _redact(error: Exception) -> str:
     """Strip password material from driver error text."""
-    import re
-
     text = str(error)
     text = re.sub(r"password=[^\s]+", "password=[redacted]", text)
+    text = re.sub(r"://([^:]+):([^@]+)@", r"://\1:[redacted]@", text)
     return text[:300]
 
 

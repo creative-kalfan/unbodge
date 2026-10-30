@@ -97,41 +97,11 @@ def _pypi():
 
 
 def _context(refs, plan_id, marker_text, marker_extra):
-    return PipelineContext(
-        repository_id=REPO_ID,
-        repo_path=str(refs["root"]),
-        old_rev=refs["old_tag"],
-        new_rev=refs["new_tag"],
-        workaround_patch=refs["patch"],
-        probe_argv=["python", "check.py"],
-        regression_argv=["python", "regression_markers.py"],
-        event=UpstreamEvent(
-            id="evt:packaging-545", repository_id="repo:packaging",
-            title=UPSTREAM_ISSUE_TITLE,
-        ),
-        issue_id=UPSTREAM_ISSUE_ID,
-        fix_id=FIX_COMMIT_ID,
-        fix_sha=FIX_COMMIT_SHA,
-        releases=(
-            Release(
-                id=RELEASE_ID, repository_id="repo:packaging", tag=RELEASE_TAG,
-                version=RELEASE_TAG, contains_fix_sha=FIX_COMMIT_SHA,
-            ),
-        ),
-        pypi=_pypi(),
-        sandbox=DockerSandbox(
-            constraints=SandboxConstraints(
-                allowed_env_keys=frozenset(
-                    {"DEP_VERSION", "WORKAROUND", "SUITE", "MARKER_EXTRA", "MARKER_TEXT"}
-                )
-            )
-        ),
-        plan_id=plan_id,
-        decision_id=f"decision:{plan_id}",
-        probe_env={"MARKER_TEXT": marker_text, "MARKER_EXTRA": marker_extra},
-        regression_env={},
-        scan_exclude_prefixes=("vendor/",),
-    )
+    from dataclasses import replace
+    from test_realcase import _context as real_context
+
+    return replace(real_context(refs), plan_id=plan_id, decision_id=f"decision:{plan_id}",
+                   probe_env={"MARKER_TEXT": marker_text, "MARKER_EXTRA": marker_extra})
 
 
 def test_dataset_v1_has_ten_honest_cases():

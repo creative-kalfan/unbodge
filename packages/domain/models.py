@@ -175,6 +175,10 @@ class ExperimentSpec(UnbodgeModel):
 class ExperimentRun(UnbodgeModel):
     """Recorded outcome of executing one :class:`ExperimentSpec`."""
 
+    # Execution strings are attested bytes decoded as text, not prose.
+    # Trimming stdout/stderr, argv or environment breaks receipt integrity.
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
     id: str = Field(min_length=1)
     spec_id: str = Field(min_length=1)
     cell: UniverseCell
@@ -256,6 +260,8 @@ class EvidenceGraph(UnbodgeModel):
 
 
 class RegressionResult(UnbodgeModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+
     id: str = Field(min_length=1)
     suite: str = Field(min_length=1)
     cell: UniverseCell = UniverseCell.D
@@ -264,6 +270,13 @@ class RegressionResult(UnbodgeModel):
     status: TestStatus
     duration_s: float = Field(ge=0.0)
     git_sha: str | None = Field(default=None, pattern=_SHA40)
+    artifact_hash: str | None = Field(default=None, pattern=_HASH64)
+    execution_receipt: str | None = None
+    command: list[str] = Field(default_factory=list)
+    environment: dict[str, str] = Field(default_factory=dict)
+    stdout: str = ""
+    stderr: str = ""
+    exit_code: int | None = None
 
     @model_validator(mode="after")
     def _status_consistent(self) -> RegressionResult:

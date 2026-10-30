@@ -210,7 +210,8 @@ def build_real_repo(path) -> dict:
     base_sha = commit_all(root, "base: plain marker evaluation against packaging 21.3")
     write(root, "pip_compat.py", PIP_COMPAT_PY)
     write(root, "check.py", CHECK_PATCHED)
-    old_sha = commit_all(root, "downstream workaround for PEP 685 markers (pip#12095 pattern)")
+    old_sha = commit_all(root, "downstream workaround for PEP 685 markers (pip#12095 pattern)\n\n"
+                        + UPSTREAM_ISSUE_URL + "\n" + DOWNSTREAM_SYMPTOM_URL)
     tag(root, "real-old")
     for stale in ("vendor/packaging", "vendor/pyparsing"):
         shutil.rmtree(root / stale, ignore_errors=True)
